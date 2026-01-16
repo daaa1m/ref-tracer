@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>REF Tracer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+    <style>
+      .visible { display: block !important; }
+      #stats-bar.visible { display: flex !important; }
+      #drop-zone.dragover { border-color: #e94560; background: #1a1a2e; }
+    </style>
+  </head>
+  <body class="h-full bg-slate-900 text-gray-200 flex flex-col font-sans">
+    <main class="flex-1 flex flex-col p-4 gap-4">
+      <div
+        id="stats-bar"
+        class="hidden gap-8 py-2 px-4 bg-slate-800 rounded text-sm items-center"
+      >
+        <div class="flex gap-2">
+          <span class="text-gray-500">Cells:</span
+          ><span class="font-semibold" id="stat-cells">0</span>
+        </div>
+        <div class="flex gap-2">
+          <span class="text-gray-500">Formulas:</span
+          ><span class="font-semibold" id="stat-formulas">0</span>
+        </div>
+        <div class="flex gap-2">
+          <span class="text-gray-500">#REF! Errors:</span
+          ><span class="font-semibold text-red-400" id="stat-refs">0</span>
+        </div>
+        <div class="flex gap-2">
+          <span class="text-gray-500">Patient Zeros:</span
+          ><span class="font-semibold text-red-400" id="stat-patient-zeros"
+            >0</span
+          >
+        </div>
+        <button
+          id="btn-filter"
+          class="ml-auto px-3 py-1 bg-slate-900 border border-pink-500 rounded text-xs hover:bg-pink-500 transition-colors"
+        >
+          Show Patient Zero Only
+        </button>
+      </div>
+
+      <div
+        id="drop-zone"
+        class="border-2 border-dashed border-slate-700 rounded-lg p-8 text-center cursor-pointer bg-slate-800 transition-all"
+      >
+        <div class="text-5xl mb-4">📊</div>
+        <p class="text-gray-500 mb-2">Drop .xlsx file here</p>
+        <p class="text-gray-600 text-sm">or click to browse</p>
+        <input type="file" id="file-input" accept=".xlsx" class="hidden" />
+      </div>
+
+      <div id="message" class="hidden text-center py-8 text-gray-500"></div>
+
+      <div
+        id="graph-container"
+        class="hidden flex-1 bg-amber-50 rounded-lg min-h-[400px] relative"
+      >
+        <div id="cy" class="absolute inset-0"></div>
+        <div
+          class="absolute top-4 right-4 bg-black/75 p-3 rounded-md text-xs z-10 text-white space-y-1"
+        >
+          <div class="flex items-center gap-2">
+            <span
+              class="w-3.5 h-3.5 rounded-full bg-gray-900 border border-gray-700"
+            ></span
+            ><span>Formula / Range</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span
+              class="w-3.5 h-3.5 rounded-full bg-blue-500 border border-blue-700"
+            ></span
+            ><span>Value</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span
+              class="w-3.5 h-3.5 rounded-full bg-green-500 border-2 border-green-600"
+            ></span
+            ><span>Cross-sheet ref</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span
+              class="w-3.5 h-3.5 rounded-full bg-red-600 border-2 border-red-800"
+            ></span
+            ><span>External workbook</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span
+              class="w-3.5 h-3.5 rounded-sm bg-amber-400 border-2 border-amber-500"
+            ></span
+            ><span>#REF! error</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span
+              class="w-3.5 h-3.5 rounded-sm bg-amber-400 border-[3px] border-red-600"
+            ></span
+            ><span>Patient zero</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="w-3.5 text-center text-gray-400 font-bold">→</span
+            ><span>References</span>
+          </div>
+        </div>
+        <div
+          id="info-panel"
+          class="hidden absolute bottom-4 right-4 bg-black/75 p-3 rounded-md text-xs z-10 text-white min-w-[200px] max-w-[300px]"
+        >
+          <h3 class="text-pink-500 font-semibold mb-2">Cell Details</h3>
+          <div class="mb-1">
+            <span class="text-gray-500">Cell: </span
+            ><span class="font-mono break-all" id="info-cell">-</span>
+          </div>
+          <div class="mb-1">
+            <span class="text-gray-500">Formula: </span
+            ><span class="font-mono break-all" id="info-formula">-</span>
+          </div>
+          <div>
+            <span class="text-gray-500">Status: </span
+            ><span id="info-status">-</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const tick = () => new Promise((r) => setTimeout(r, 0));
+      let cy,
+        filterActive = false;
+
+      $("drop-zone").onclick = () => $("file-input").click();
+      $("drop-zone").ondragover = (e) => {
+        e.preventDefault();
+        e.target.closest("#drop-zone").classList.add("dragover");
+      };
+      $("drop-zone").ondragleave = (e) =>
+        e.target.closest("#drop-zone")?.classList.remove("dragover");
+      $("drop-zone").ondrop = (e) => {
+        e.preventDefault();
+        $("drop-zone").classList.remove("dragover");
+        e.dataTransfer.files[0] && handleFile(e.dataTransfer.files[0]);
+      };
+      $("file-input").onchange = (e) =>
+        e.target.files[0] && handleFile(e.target.files[0]);
+
+      $("btn-filter").onclick = () => {
+        if (!cy) return;
+        filterActive = !filterActive;
+        $("btn-filter").classList.toggle("bg-pink-500", filterActive);
+        $("btn-filter").textContent = filterActive
+          ? "Show All"
+          : "Show Patient Zero Only";
+        cy.batch(() => {
+          cy.nodes(filterActive ? "[!isPatientZero]" : "").style(
+            "display",
+            filterActive ? "none" : "element",
+          );
+          cy.edges().style("display", filterActive ? "none" : "element");
+        });
+      };
+
+      async function handleFile(file) {
+        if (!file.name.endsWith(".xlsx"))
+          return showMsg("Please upload an .xlsx file");
+        showMsg("Parsing...");
+        $("drop-zone").classList.add("hidden");
+
+        try {
+          const workbook = XLSX.read(await file.arrayBuffer(), {
+            type: "array",
+          });
+          const { nodes, edges, externals, stats } =
+            await parseWorkbook(workbook);
+
+          if (!nodes.length) return showMsg("No formulas found.");
+          if (stats.totalCells > 5000) {
+            showMsg(`Warning: ${stats.totalCells} cells may be slow.`);
+            await new Promise((r) => setTimeout(r, 1500));
+          }
+
+          $("stat-cells").textContent = stats.totalCells;
+          $("stat-formulas").textContent = stats.formulaCells;
+          $("stat-refs").textContent = stats.refErrors;
+          $("stat-patient-zeros").textContent = stats.patientZeros;
+
+          $("message").classList.remove("visible");
+          ["stats-bar", "graph-container", "info-panel"].forEach((id) =>
+            $(id).classList.add("visible"),
+          );
+          renderGraph(nodes, edges, externals);
+        } catch (err) {
+          console.error(err);
+          showMsg(`Error: ${err.message}`);
+        }
+      }
+
+      function showMsg(text) {
+        $("message").textContent = text;
+        $("message").classList.add("visible");
+      }
+
+      async function parseWorkbook(workbook) {
+        const nodes = [],
+          edges = [],
+          externals = new Set();
+        let totalCells = 0,
+          formulaCells = 0,
+          refErrors = 0;
+
+        for (const sheetName of workbook.SheetNames) {
+          const sheet = workbook.Sheets[sheetName];
+          for (const addr of Object.keys(sheet)) {
+            if (addr[0] === "!") continue;
+            totalCells++;
+            const cell = sheet[addr];
+            if (!cell.f) continue;
+            formulaCells++;
+            const hasRefInFormula = cell.f.includes("#REF!");
+            const hasRefValue =
+              cell.t === "e" && (cell.w === "#REF!" || cell.v === 0x07);
+            const hasRef = hasRefInFormula || hasRefValue;
+            if (hasRef) refErrors++;
+
+            const node = {
+              id: `${sheetName}!${addr}`,
+              sheet: sheetName,
+              cell: addr,
+              formula: cell.f,
+              hasRef,
+              isPatientZero: hasRefInFormula,
+              value: cell.v,
+            };
+            nodes.push(node);
+          }
+          await tick();
+        }
+
+        for (const node of nodes) {
+          const { refs, extRefs } = extractRefs(node.formula, node.sheet);
+          for (const ref of refs) {
+            if (ref.split("!")[0] !== node.sheet) node.hasCrossSheetRef = true;
+            edges.push({ source: node.id, target: ref });
+          }
+          for (const ext of extRefs) {
+            externals.add(ext);
+            edges.push({ source: node.id, target: ext });
+          }
+        }
+
+        return {
+          nodes,
+          edges,
+          externals,
+          stats: {
+            totalCells,
+            formulaCells,
+            refErrors,
+            patientZeros: nodes.filter((n) => n.isPatientZero).length,
+          },
+        };
+      }
+
+      function extractRefs(formula, currentSheet) {
+        const refs = new Set(),
+          extRefs = new Set();
+        const extRe = /\[([^\]]+)\](?:'([^']+)'|(\w+))![^,)\s]+/gi;
+        const rangeRe =
+          /(?:(?:'([^']+)'|(\w+))!)?\$?([A-Z]+)\$?(\d+):\$?([A-Z]+)\$?(\d+)/gi;
+        const cellRe = /(?:(?:'([^']+)'|(\w+))!)?\$?([A-Z]+)\$?(\d+)(?!:)/gi;
+
+        const processed = [];
+        for (const [re, handler] of [
+          [extRe, (m) => extRefs.add(`[${m[1]}]${m[2] || m[3]}`)],
+          [
+            rangeRe,
+            (m) =>
+              refs.add(
+                `${m[1] || m[2] || currentSheet}!${m[3].toUpperCase()}${m[4]}:${m[5].toUpperCase()}${m[6]}`,
+              ),
+          ],
+        ]) {
+          let m;
+          while ((m = re.exec(formula))) {
+            handler(m);
+            processed.push([m.index, m.index + m[0].length]);
+          }
+        }
+
+        let m;
+        while ((m = cellRe.exec(formula))) {
+          if (
+            processed.some(([s, e]) => m.index >= s && m.index < e) ||
+            m[0].includes("#REF!")
+          )
+            continue;
+          refs.add(
+            `${m[1] || m[2] || currentSheet}!${m[3].toUpperCase()}${m[4]}`,
+          );
+        }
+
+        return { refs: [...refs], extRefs: [...extRefs] };
+      }
+
+      function renderGraph(nodes, edges, externals) {
+        const elements = [];
+        const nodeIds = new Set(nodes.map((n) => n.id));
+        const placeholders = new Set();
+
+        for (const n of nodes)
+          elements.push({
+            data: {
+              id: n.id,
+              label: n.cell,
+              formula: n.formula,
+              hasRef: n.hasRef,
+              isPatientZero: n.isPatientZero,
+              hasCrossSheetRef: n.hasCrossSheetRef,
+              value: n.value,
+            },
+          });
+        for (const ext of externals)
+          elements.push({ data: { id: ext, label: ext, isExternal: true } });
+
+        for (const e of edges) {
+          if (
+            !nodeIds.has(e.target) &&
+            !externals.has(e.target) &&
+            !placeholders.has(e.target)
+          ) {
+            placeholders.add(e.target);
+            const label = e.target.split("!").pop();
+            elements.push({
+              data: {
+                id: e.target,
+                label,
+                hasRef: e.target.includes("#REF!"),
+                isValue: !label.includes(":"),
+              },
+            });
+          }
+          elements.push({
+            data: {
+              id: `${e.source}->${e.target}`,
+              source: e.source,
+              target: e.target,
+            },
+          });
+        }
+
+        cy = cytoscape({
+          container: $("cy"),
+          elements,
+          style: [
+            {
+              selector: "node",
+              style: {
+                "background-color": "#1a1a1a",
+                label: "data(label)",
+                color: "#fff",
+                "text-valign": "center",
+                "text-halign": "center",
+                "font-size": "10px",
+                width: 30,
+                height: 30,
+                "border-width": 1,
+                "border-color": "#333",
+              },
+            },
+            {
+              selector: "node[?isValue]",
+              style: {
+                "background-color": "#3b82f6",
+                "border-color": "#1d4ed8",
+              },
+            },
+            {
+              selector: "node[?hasCrossSheetRef]",
+              style: {
+                "background-color": "#22c55e",
+                "border-color": "#16a34a",
+                "border-width": 2,
+              },
+            },
+            {
+              selector: "node[?isExternal]",
+              style: {
+                "background-color": "#dc2626",
+                "border-color": "#991b1b",
+                "border-width": 2,
+              },
+            },
+            {
+              selector: "node[?hasRef]",
+              style: {
+                "background-color": "#fbbf24",
+                "border-color": "#f59e0b",
+                "border-width": 2,
+                shape: "rectangle",
+                color: "#000",
+                width: 35,
+                height: 35,
+              },
+            },
+            {
+              selector: "node[?isPatientZero]",
+              style: {
+                "background-color": "#fbbf24",
+                "border-color": "#dc2626",
+                "border-width": 4,
+                shape: "rectangle",
+                color: "#000",
+                width: 50,
+                height: 50,
+              },
+            },
+            {
+              selector: "node:selected",
+              style: { "border-color": "#3498db", "border-width": 3 },
+            },
+            {
+              selector: "edge",
+              style: {
+                width: 1.5,
+                "line-color": "#666",
+                "target-arrow-color": "#666",
+                "target-arrow-shape": "triangle",
+                "curve-style": "bezier",
+                "arrow-scale": 0.8,
+              },
+            },
+          ],
+          layout: {
+            name: "cose",
+            animate: false,
+            nodeOverlap: 20,
+            componentSpacing: 100,
+            nodeRepulsion: 400000,
+            idealEdgeLength: 100,
+          },
+        });
+
+        cy.on("tap", (evt) => {
+          const d = evt.target.data?.() || {};
+          const isNode = evt.target !== cy && d.id;
+          $("info-cell").textContent = isNode ? d.id : "-";
+          $("info-formula").textContent = isNode
+            ? d.formula
+              ? `=${d.formula}`
+              : (d.value ?? d.id)
+            : "-";
+          $("info-status").textContent = isNode
+            ? d.isPatientZero
+              ? "Patient Zero"
+              : d.hasRef
+                ? "#REF! Error"
+                : "OK"
+            : "-";
+          $("info-status").className = d.isPatientZero
+            ? "text-yellow-400 font-bold"
+            : d.hasRef
+              ? "text-red-400 font-bold"
+              : "";
+        });
+      }
+    </script>
+  </body>
+</html>
