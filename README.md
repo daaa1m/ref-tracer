@@ -13,8 +13,10 @@ Ever had a spreadsheet full of `#REF!` errors and no idea where they started? Th
 - **Single HTML file** - no build step, no dependencies to install
 - **Under 500 lines** - lightweight
 - **Drag & drop** - just drop your `.xlsx` file
-- **Visual graph** - see how formulas connect
 - **Patient zero detection** - find the root cause if all your `#REF!`
+- **Visual graph** - see how formulas connect, looks pretty like below
+
+![image of ref tracer outputt](<./image.png>)
 
 ## Usage
 
